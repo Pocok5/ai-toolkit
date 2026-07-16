@@ -736,9 +736,12 @@ class ModelConfig:
         # saved dtype via torch_dtype="auto") instead of loading from name_or_path
         # and running on-the-fly quantization.
         # Accepts the formats:
-        #   "username/repo-name"               - HF repo with no subfolder
-        #   "username/repo-name/subfolder"     - HF repo with explicit subfolder
-        #   "/local/path/to/transformer"       - local model directory
+        #   "username/repo-name"                         - HF repo (no subfolder)
+        #   "username/repo-name/subfolder"               - HF repo with subfolder
+        #   "/local/path/to/transformer"                 - local model directory
+        #   "/local/path/to/transformer.safetensors"     - specific local file
+        #   "username/repo-name:model-fp8.safetensors"   - specific file from HF repo
+        #   "username/repo-name/subfolder:model-q4.safetensors" - file in a subfolder
         self.quantized_model_id: Optional[str] = kwargs.get("quantized_model_id", None)
 
         # Same as quantized_model_id but for the text encoder.

@@ -29,6 +29,7 @@ from toolkit.accelerator import unwrap_model
 from toolkit.advanced_prompt_embeds import AdvancedPromptEmbeds
 from toolkit.basic import flush
 from toolkit.config_modules import GenerateImageConfig, ModelConfig
+from toolkit.dequantize import patch_dequantization_on_save
 from toolkit.models.base_model import BaseModel
 from toolkit.samplers.custom_flowmatch_sampler import (
     CustomFlowMatchEulerDiscreteScheduler,
@@ -181,7 +182,6 @@ class BooguImageModel(BaseModel):
                     f"Could not load pre-quantized Boogu transformer from "
                     f"'{self.model_config.quantized_model_id}': {e}"
                 ) from e
-            from toolkit.dequantize import patch_dequantization_on_save
             patch_dequantization_on_save(transformer)
         else:
             try:

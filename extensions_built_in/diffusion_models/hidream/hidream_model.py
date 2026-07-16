@@ -135,8 +135,11 @@ class HidreamModel(BaseModel):
                 self.hidream_transformer_class,
             )
             patch_dequantization_on_save(transformer)
+            # In low_vram mode the transformer is intentionally kept on CPU
+            # until after all other components are loaded (see below).
+            # dtype is omitted to preserve the pre-quantized weight dtypes.
             if not self.low_vram:
-                transformer.to(self.device_torch, dtype=dtype)
+                transformer.to(self.device_torch)
         else:
             transformer = self.hidream_transformer_class.from_pretrained(
                 model_path,

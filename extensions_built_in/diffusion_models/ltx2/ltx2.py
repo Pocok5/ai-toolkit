@@ -18,6 +18,8 @@ from accelerate import init_empty_weights
 from toolkit.accelerator import unwrap_model
 from optimum.quanto import freeze
 from toolkit.util.quantize import quantize, get_qtype, quantize_model
+from toolkit.dequantize import patch_dequantization_on_save
+from toolkit.util.prequantized import load_prequantized_model as _load_prequantized_model
 from toolkit.memory_management import MemoryManager
 from safetensors.torch import load_file
 from PIL import Image
@@ -251,53 +253,63 @@ class LTX2Model(BaseModel):
 
         self.print_and_status_update("Loading transformer")
 
-        if not os.path.exists(model_path) and model_path.endswith(".safetensors"):
-            # download the model from the Hugging Face Hub if it is not a local path
-            splits = model_path.split("/")
-            if len(splits) != 3:
-                raise ValueError(
-                    f"Invalid model path: {model_path}. Must be in the format 'repo_id/repo/filename.safetensors' to download from the Hugging Face Hub."
-                )
-            # download the model from the hub
-            model_path = huggingface_hub.hf_hub_download(
-                repo_id="/".join(splits[:2]),
-                filename=splits[2],
-                token=HF_TOKEN,
+        if self.model_config.quantized_model_id is not None:
+            self.print_and_status_update(
+                f"Loading pre-quantized transformer from {self.model_config.quantized_model_id}"
             )
-
-        # if we have a safetensors file it is a mono checkpoint
-        if os.path.exists(model_path) and model_path.endswith(".safetensors"):
-            combined_state_dict = load_file(model_path)
-            combined_state_dict = dequantize_state_dict(combined_state_dict)
-
-        if combined_state_dict is not None:
-            original_dit_ckpt = get_model_state_dict_from_combined_ckpt(
-                combined_state_dict, dit_prefix
+            transformer = _load_prequantized_model(
+                self.model_config.quantized_model_id,
+                LTX2VideoTransformer3DModel,
             )
-            transformer = convert_ltx2_transformer(
-                original_dit_ckpt, version=self.ltx_version
-            )
-            transformer = transformer.to(dtype)
+            patch_dequantization_on_save(transformer)
         else:
-            transformer_path = model_path
-            transformer_subfolder = "transformer"
-            if os.path.exists(transformer_path):
-                transformer_subfolder = None
-                transformer_path = os.path.join(transformer_path, "transformer")
-                # check if the path is a full checkpoint.
-                te_folder_path = os.path.join(model_path, "text_encoder")
-                # if we have the te, this folder is a full checkpoint, use it as the base
-                if os.path.exists(te_folder_path):
-                    base_model_path = model_path
+            if not os.path.exists(model_path) and model_path.endswith(".safetensors"):
+                # download the model from the Hugging Face Hub if it is not a local path
+                splits = model_path.split("/")
+                if len(splits) != 3:
+                    raise ValueError(
+                        f"Invalid model path: {model_path}. Must be in the format 'repo_id/repo/filename.safetensors' to download from the Hugging Face Hub."
+                    )
+                # download the model from the hub
+                model_path = huggingface_hub.hf_hub_download(
+                    repo_id="/".join(splits[:2]),
+                    filename=splits[2],
+                    token=HF_TOKEN,
+                )
 
-            transformer = LTX2VideoTransformer3DModel.from_pretrained(
-                transformer_path, subfolder=transformer_subfolder, torch_dtype=dtype
-            )
+            # if we have a safetensors file it is a mono checkpoint
+            if os.path.exists(model_path) and model_path.endswith(".safetensors"):
+                combined_state_dict = load_file(model_path)
+                combined_state_dict = dequantize_state_dict(combined_state_dict)
 
-        if self.model_config.quantize:
-            self.print_and_status_update("Quantizing Transformer")
-            quantize_model(self, transformer)
-            flush()
+            if combined_state_dict is not None:
+                original_dit_ckpt = get_model_state_dict_from_combined_ckpt(
+                    combined_state_dict, dit_prefix
+                )
+                transformer = convert_ltx2_transformer(
+                    original_dit_ckpt, version=self.ltx_version
+                )
+                transformer = transformer.to(dtype)
+            else:
+                transformer_path = model_path
+                transformer_subfolder = "transformer"
+                if os.path.exists(transformer_path):
+                    transformer_subfolder = None
+                    transformer_path = os.path.join(transformer_path, "transformer")
+                    # check if the path is a full checkpoint.
+                    te_folder_path = os.path.join(model_path, "text_encoder")
+                    # if we have the te, this folder is a full checkpoint, use it as the base
+                    if os.path.exists(te_folder_path):
+                        base_model_path = model_path
+
+                transformer = LTX2VideoTransformer3DModel.from_pretrained(
+                    transformer_path, subfolder=transformer_subfolder, torch_dtype=dtype
+                )
+
+            if self.model_config.quantize:
+                self.print_and_status_update("Quantizing Transformer")
+                quantize_model(self, transformer)
+                flush()
 
         if (
             self.model_config.layer_offloading
@@ -325,7 +337,22 @@ class LTX2Model(BaseModel):
         flush()
 
         self.print_and_status_update("Loading text encoder")
-        if (
+        if self.model_config.quantized_te_id is not None:
+            self.print_and_status_update(
+                f"Loading pre-quantized text encoder from {self.model_config.quantized_te_id}"
+            )
+            # Derive the tokenizer path: use the same source as the TE when
+            # it is a plain directory/repo (not a :file.safetensors specifier),
+            # otherwise fall back to the known base tokenizer path.
+            te_id_for_tok = self.model_config.quantized_te_id
+            if ":" in te_id_for_tok:
+                te_id_for_tok = te_id_for_tok.rpartition(":")[0]
+            tokenizer = GemmaTokenizerFast.from_pretrained(te_id_for_tok)
+            text_encoder = _load_prequantized_model(
+                self.model_config.quantized_te_id,
+                Gemma3ForConditionalGeneration,
+            )
+        elif (
             self.model_config.te_name_or_path is not None
             and self.model_config.te_name_or_path.endswith(".safetensors")
         ):
@@ -427,8 +454,8 @@ class LTX2Model(BaseModel):
         # remove the vision tower
         text_encoder.model.vision_tower = None
         flush()
-        
-        if self.model_config.quantize_te:
+
+        if self.model_config.quantized_te_id is None and self.model_config.quantize_te:
             self.print_and_status_update("Quantizing Text Encoder")
             quantize(text_encoder, weights=get_qtype(self.model_config.qtype_te))
             freeze(text_encoder)
@@ -447,7 +474,12 @@ class LTX2Model(BaseModel):
                 ],
             )
 
-        text_encoder.to(self.device_torch, dtype=dtype)
+        # Move to device; omit dtype when using a pre-quantized TE so the
+        # saved quantized weight dtypes (e.g. float8_e4m3fn) are preserved.
+        if self.model_config.quantized_te_id is not None:
+            text_encoder.to(self.device_torch)
+        else:
+            text_encoder.to(self.device_torch, dtype=dtype)
         flush()
 
         self.print_and_status_update("Loading VAEs and other components")

@@ -65,6 +65,7 @@ from toolkit.models.flux import add_model_gpu_splitter_to_flux, bypass_flux_guid
 
 from optimum.quanto import freeze, qfloat8, QTensor, qint4
 from toolkit.util.quantize import quantize, get_qtype
+from toolkit.util.prequantized import load_prequantized_model as _load_prequantized_model
 from toolkit.accelerator import get_accelerator, unwrap_model
 from typing import TYPE_CHECKING
 from toolkit.print import print_acc
@@ -99,8 +100,6 @@ DO_NOT_TRAIN_WEIGHTS = [
 ]
 
 DeviceStatePreset = Literal['cache_latents', 'generate']
-
-from toolkit.util.prequantized import load_prequantized_model as _load_prequantized_model
 
 
 class BlankNetwork:
@@ -399,7 +398,10 @@ class StableDiffusion:
                     SD3Transformer2DModel,
                 )
                 patch_dequantization_on_save(transformer)
-                transformer.to(self.device_torch)
+                # Keep the pre-quantized model on CPU in low_vram mode just like
+                # the on-the-fly quantization path does.
+                if not self.low_vram:
+                    transformer.to(self.device_torch)
             else:
                 transformer = SD3Transformer2DModel.from_pretrained(
                     transformer_path,
@@ -438,6 +440,8 @@ class StableDiffusion:
                     self.model_config.quantized_te_id,
                     T5EncoderModel,
                 )
+                # Move to device; dtype is intentionally omitted here so the
+                # pre-quantized weight dtypes (e.g. float8_e4m3fn) are preserved.
                 text_encoder_3.to(self.device_torch)
             else:
                 text_encoder_3 = T5EncoderModel.from_pretrained(
@@ -835,6 +839,8 @@ class StableDiffusion:
                     self.model_config.quantized_te_id,
                     T5EncoderModel,
                 )
+                # Move to device; dtype is intentionally omitted to preserve
+                # the pre-quantized weight dtypes (e.g. float8_e4m3fn).
                 text_encoder_2.to(self.device_torch)
             else:
                 text_encoder_2 = T5EncoderModel.from_pretrained(
