@@ -110,6 +110,9 @@ def save_quantized_cache(
     # serialize them directly.  We expand optimum-quanto QTensors into their
     # raw ._data / ._scale components (preserving the quantized representation)
     # and dequantize any other tensor subclass as a fallback.
+    # NOTE: `type(t) is not torch.Tensor` (exact-type check) intentionally matches
+    # *only* plain tensors.  `isinstance` would return True for subclasses too,
+    # which is exactly what we want to avoid here.
     cpu_sd: dict = {}
     for key, tensor in sd.items():
         try:
