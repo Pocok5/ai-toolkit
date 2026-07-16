@@ -169,7 +169,7 @@ class ExampleModel(BaseModel):
             # quantize_model handles qtype selection, exclusions and device
             # juggling, and leaves the model on CPU
             self.print_and_status_update("Quantizing transformer")
-            quantize_model(self, transformer)
+            transformer = quantize_model(self, transformer)
             flush()
 
         if self.model_config.low_vram:

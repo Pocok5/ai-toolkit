@@ -660,6 +660,11 @@ class ModelConfig:
         self.quantize_te = kwargs.get("quantize_te", self.quantize)
         self.qtype = kwargs.get("qtype", "qfloat8")
         self.qtype_te = kwargs.get("qtype_te", "qfloat8")
+        # Cache directory for post-quantization state dicts.
+        # Defaults to ~/.cache/ai-toolkit/quantized/.  Set to a custom path to
+        # override, or set use_quantize_cache: false to disable caching.
+        self.quantize_cache_dir: Optional[str] = kwargs.get("quantize_cache_dir", None)
+        self.use_quantize_cache: bool = bool(kwargs.get("use_quantize_cache", True))
         self.low_vram = kwargs.get("low_vram", False)
         self.attn_masking = kwargs.get("attn_masking", False)
         if self.attn_masking and not self.is_flux:

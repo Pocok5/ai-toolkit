@@ -306,7 +306,7 @@ class Wan2214bModel(Wan21):
         if self.model_config.quantize and self.model_config.accuracy_recovery_adapter is None:
             # todo handle two ARAs
             self.print_and_status_update("Quantizing Transformer 1")
-            quantize_model(self, transformer_1)
+            transformer_1 = quantize_model(self, transformer_1, cache_tag="transformer_1")
             flush()
 
         if self.model_config.low_vram:
@@ -336,7 +336,7 @@ class Wan2214bModel(Wan21):
         if self.model_config.quantize and self.model_config.accuracy_recovery_adapter is None:
             # todo handle two ARAs
             self.print_and_status_update("Quantizing Transformer 2")
-            quantize_model(self, transformer_2)
+            transformer_2 = quantize_model(self, transformer_2, cache_tag="transformer_2")
             flush()
 
         if self.model_config.low_vram:
@@ -360,7 +360,7 @@ class Wan2214bModel(Wan21):
         if self.model_config.quantize and self.model_config.accuracy_recovery_adapter is not None:
             # apply the accuracy recovery adapter to both transformers
             self.print_and_status_update("Applying Accuracy Recovery Adapter to Transformers")
-            quantize_model(self, transformer)
+            transformer = quantize_model(self, transformer)
             flush()
             
         

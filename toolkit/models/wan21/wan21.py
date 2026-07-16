@@ -374,7 +374,7 @@ class Wan21(BaseModel):
         
         if self.model_config.quantize:
             self.print_and_status_update("Quantizing Transformer")
-            quantize_model(self, transformer)
+            transformer = quantize_model(self, transformer)
             flush()
         
         if self.model_config.layer_offloading and self.model_config.layer_offloading_transformer_percent > 0:

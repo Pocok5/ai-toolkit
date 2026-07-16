@@ -198,7 +198,7 @@ class BooguImageModel(BaseModel):
 
             if self.model_config.quantize:
                 self.print_and_status_update("Quantizing transformer")
-                quantize_model(self, transformer)
+                transformer = quantize_model(self, transformer)
                 flush()
 
         transformer.eval()

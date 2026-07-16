@@ -308,7 +308,7 @@ class LTX2Model(BaseModel):
 
             if self.model_config.quantize:
                 self.print_and_status_update("Quantizing Transformer")
-                quantize_model(self, transformer)
+                transformer = quantize_model(self, transformer)
                 flush()
 
         if (
