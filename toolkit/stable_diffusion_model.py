@@ -65,6 +65,7 @@ from toolkit.models.flux import add_model_gpu_splitter_to_flux, bypass_flux_guid
 
 from optimum.quanto import freeze, qfloat8, QTensor, qint4
 from toolkit.util.quantize import quantize, get_qtype
+from toolkit.util.prequantized import load_prequantized_model as _load_prequantized_model
 from toolkit.accelerator import get_accelerator, unwrap_model
 from typing import TYPE_CHECKING
 from toolkit.print import print_acc
@@ -389,28 +390,41 @@ class StableDiffusion:
             else:
                 # is remote use whatever path we were given
                 base_model_path = model_path
-            
-            transformer = SD3Transformer2DModel.from_pretrained(
-                transformer_path,
-                subfolder=subfolder,
-                torch_dtype=dtype,
-            )
-            if not self.low_vram:
-                # for low v ram, we leave it on the cpu. Quantizes slower, but allows training on primary gpu
-                transformer.to(self.quantize_device, dtype=dtype)
-            flush()
-            
-            if self.model_config.lora_path is not None:
-                raise ValueError("LoRA is not supported for SD3 models currently")
-            
-            if self.model_config.quantize:
-                quantization_type = get_qtype(self.model_config.qtype)
-                print_acc("Quantizing transformer")
-                quantize(transformer, weights=quantization_type)
-                freeze(transformer)
-                transformer.to(self.device_torch)
+
+            if self.model_config.quantized_model_id is not None:
+                print_acc(f"Loading pre-quantized transformer from {self.model_config.quantized_model_id}")
+                transformer = _load_prequantized_model(
+                    self.model_config.quantized_model_id,
+                    SD3Transformer2DModel,
+                )
+                patch_dequantization_on_save(transformer)
+                # Keep the pre-quantized model on CPU in low_vram mode just like
+                # the on-the-fly quantization path does.
+                if not self.low_vram:
+                    transformer.to(self.device_torch)
             else:
-                transformer.to(self.device_torch, dtype=dtype)
+                transformer = SD3Transformer2DModel.from_pretrained(
+                    transformer_path,
+                    subfolder=subfolder,
+                    torch_dtype=dtype,
+                )
+                if not self.low_vram:
+                    # for low v ram, we leave it on the cpu. Quantizes slower, but allows training on primary gpu
+                    transformer.to(self.quantize_device, dtype=dtype)
+                flush()
+                
+                if self.model_config.lora_path is not None:
+                    raise ValueError("LoRA is not supported for SD3 models currently")
+                
+                if self.model_config.quantize:
+                    quantization_type = get_qtype(self.model_config.qtype)
+                    print_acc("Quantizing transformer")
+                    quantize(transformer, weights=quantization_type)
+                    freeze(transformer)
+                    transformer.to(self.device_torch)
+                else:
+                    transformer.to(self.device_torch, dtype=dtype)
+            flush()
                 
             scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(base_model_path, subfolder="scheduler")
             print_acc("Loading vae")
@@ -419,18 +433,28 @@ class StableDiffusion:
             
             print_acc("Loading t5")
             tokenizer_3 = T5TokenizerFast.from_pretrained(base_model_path, subfolder="tokenizer_3", torch_dtype=dtype)
-            text_encoder_3 = T5EncoderModel.from_pretrained(
-                base_model_path, 
-                subfolder="text_encoder_3", 
-                torch_dtype=dtype
-            )
-            
-            text_encoder_3.to(self.device_torch, dtype=dtype)
-            flush()
 
-            if self.model_config.quantize:
-                print_acc("Quantizing T5")
-                quantize(text_encoder_3, weights=get_qtype(self.model_config.qtype))
+            if self.model_config.quantized_te_id is not None:
+                print_acc(f"Loading pre-quantized T5 from {self.model_config.quantized_te_id}")
+                text_encoder_3 = _load_prequantized_model(
+                    self.model_config.quantized_te_id,
+                    T5EncoderModel,
+                )
+                # Move to device; dtype is intentionally omitted here so the
+                # pre-quantized weight dtypes (e.g. float8_e4m3fn) are preserved.
+                text_encoder_3.to(self.device_torch)
+            else:
+                text_encoder_3 = T5EncoderModel.from_pretrained(
+                    base_model_path,
+                    subfolder="text_encoder_3",
+                    torch_dtype=dtype
+                )
+                text_encoder_3.to(self.device_torch, dtype=dtype)
+                flush()
+
+                if self.model_config.quantize:
+                    print_acc("Quantizing T5")
+                    quantize(text_encoder_3, weights=get_qtype(self.model_config.qtype))
                 freeze(text_encoder_3)
                 flush()
                 
@@ -645,143 +669,154 @@ class StableDiffusion:
                 if os.path.exists(te_folder_path):
                     base_model_path = model_path
 
-            transformer = FluxTransformer2DModel.from_pretrained(
-                transformer_path,
-                subfolder=subfolder,
-                torch_dtype=dtype,
-                # low_cpu_mem_usage=False,
-                # device_map=None
-            )
-            # hack in model gpu splitter
-            if self.model_config.split_model_over_gpus:
-                add_model_gpu_splitter_to_flux(
-                    transformer, 
-                    other_module_param_count_scale=self.model_config.split_model_other_module_param_count_scale
+            if self.model_config.quantized_model_id is not None:
+                self.print_and_status_update(
+                    f"Loading pre-quantized transformer from {self.model_config.quantized_model_id}"
                 )
-            
-            if not self.low_vram:
-                # for low v ram, we leave it on the cpu. Quantizes slower, but allows training on primary gpu
-                transformer.to(self.quantize_device, dtype=dtype)
-            flush()
-
-            if self.model_config.assistant_lora_path is not None or self.model_config.inference_lora_path is not None:
-                if self.model_config.inference_lora_path is not None and self.model_config.assistant_lora_path is not None:
-                    raise ValueError("Cannot load both assistant lora and inference lora at the same time")
-                
-                if self.model_config.lora_path:
-                    raise ValueError("Cannot load both assistant lora and lora at the same time")
-
-                if not self.is_flux:
-                    raise ValueError("Assistant/ inference lora is only supported for flux models currently")
-                
-                load_lora_path = self.model_config.inference_lora_path
-                if load_lora_path is None:
-                    load_lora_path = self.model_config.assistant_lora_path
-
-                if os.path.isdir(load_lora_path):
-                    load_lora_path = os.path.join(
-                        load_lora_path, "pytorch_lora_weights.safetensors"
-                    )
-                elif not os.path.exists(load_lora_path):
-                    print_acc(f"Grabbing lora from the hub: {load_lora_path}")
-                    new_lora_path = hf_hub_download(
-                        load_lora_path,
-                        filename="pytorch_lora_weights.safetensors"
-                    )
-                    # replace the path
-                    load_lora_path = new_lora_path
-                    
-                    if self.model_config.inference_lora_path is not None:
-                        self.model_config.inference_lora_path = new_lora_path
-                    if self.model_config.assistant_lora_path is not None:
-                        self.model_config.assistant_lora_path = new_lora_path
-
-                if self.model_config.assistant_lora_path is not None:
-                    # for flux, we assume it is flux schnell. We cannot merge in the assistant lora and unmerge it on
-                    # quantized weights so it had to process unmerged (slow). Since schnell samples in just 4 steps
-                    # it is better to merge it in now, and sample slowly later, otherwise training is slowed in half
-                    # so we will merge in now and sample with -1 weight later
-                    self.invert_assistant_lora = True
-                    # trigger it to get merged in
-                    self.model_config.lora_path = self.model_config.assistant_lora_path
-
-            if self.model_config.lora_path is not None:
-                print_acc("Fusing in LoRA")
-                # need the pipe for peft
-                pipe: FluxPipeline = FluxPipeline(
-                    scheduler=None,
-                    text_encoder=None,
-                    tokenizer=None,
-                    text_encoder_2=None,
-                    tokenizer_2=None,
-                    vae=None,
-                    transformer=transformer,
+                transformer = _load_prequantized_model(
+                    self.model_config.quantized_model_id,
+                    FluxTransformer2DModel,
                 )
-                if self.low_vram:
-                    # we cannot fuse the loras all at once without ooming in lowvram mode, so we have to do it in parts
-                    # we can do it on the cpu but it takes about 5-10 mins vs seconds on the gpu
-                    # we are going to separate it into the two transformer blocks one at a time
-
-                    lora_state_dict = load_file(self.model_config.lora_path)
-                    single_transformer_lora = {}
-                    single_block_key = "transformer.single_transformer_blocks."
-                    double_transformer_lora = {}
-                    double_block_key = "transformer.transformer_blocks."
-                    for key, value in lora_state_dict.items():
-                        if single_block_key in key:
-                            single_transformer_lora[key] = value
-                        elif double_block_key in key:
-                            double_transformer_lora[key] = value
-                        else:
-                            raise ValueError(f"Unknown lora key: {key}. Cannot load this lora in low vram mode")
-
-                    # double blocks
-                    transformer.transformer_blocks = transformer.transformer_blocks.to(
-                        self.quantize_device, dtype=dtype
-                    )
-                    pipe.load_lora_weights(double_transformer_lora, adapter_name=f"lora1_double")
-                    pipe.fuse_lora()
-                    pipe.unload_lora_weights()
-                    transformer.transformer_blocks = transformer.transformer_blocks.to(
-                        'cpu', dtype=dtype
-                    )
-
-                    # single blocks
-                    transformer.single_transformer_blocks = transformer.single_transformer_blocks.to(
-                        self.quantize_device, dtype=dtype
-                    )
-                    pipe.load_lora_weights(single_transformer_lora, adapter_name=f"lora1_single")
-                    pipe.fuse_lora()
-                    pipe.unload_lora_weights()
-                    transformer.single_transformer_blocks = transformer.single_transformer_blocks.to(
-                        'cpu', dtype=dtype
-                    )
-
-                    # cleanup
-                    del single_transformer_lora
-                    del double_transformer_lora
-                    del lora_state_dict
-                    flush()
-
-                else:
-                    # need the pipe to do this unfortunately for now
-                    # we have to fuse in the weights before quantizing
-                    pipe.load_lora_weights(self.model_config.lora_path, adapter_name="lora1")
-                    pipe.fuse_lora()
-                    # unfortunately, not an easier way with peft
-                    pipe.unload_lora_weights()
-            flush()
-            
-            if self.model_config.quantize:
-                # patch the state dict method
                 patch_dequantization_on_save(transformer)
-                quantization_type = get_qtype(self.model_config.qtype)
-                self.print_and_status_update("Quantizing transformer")
-                quantize(transformer, weights=quantization_type, **self.model_config.quantize_kwargs)
-                freeze(transformer)
                 transformer.to(self.device_torch)
             else:
-                transformer.to(self.device_torch, dtype=dtype)
+                transformer = FluxTransformer2DModel.from_pretrained(
+                    transformer_path,
+                    subfolder=subfolder,
+                    torch_dtype=dtype,
+                    # low_cpu_mem_usage=False,
+                    # device_map=None
+                )
+                # hack in model gpu splitter
+                if self.model_config.split_model_over_gpus:
+                    add_model_gpu_splitter_to_flux(
+                        transformer,
+                        other_module_param_count_scale=self.model_config.split_model_other_module_param_count_scale
+                    )
+
+                if not self.low_vram:
+                    # for low v ram, we leave it on the cpu. Quantizes slower, but allows training on primary gpu
+                    transformer.to(self.quantize_device, dtype=dtype)
+                flush()
+
+                if self.model_config.assistant_lora_path is not None or self.model_config.inference_lora_path is not None:
+                    if self.model_config.inference_lora_path is not None and self.model_config.assistant_lora_path is not None:
+                        raise ValueError("Cannot load both assistant lora and inference lora at the same time")
+
+                    if self.model_config.lora_path:
+                        raise ValueError("Cannot load both assistant lora and lora at the same time")
+
+                    if not self.is_flux:
+                        raise ValueError("Assistant/ inference lora is only supported for flux models currently")
+
+                    load_lora_path = self.model_config.inference_lora_path
+                    if load_lora_path is None:
+                        load_lora_path = self.model_config.assistant_lora_path
+
+                    if os.path.isdir(load_lora_path):
+                        load_lora_path = os.path.join(
+                            load_lora_path, "pytorch_lora_weights.safetensors"
+                        )
+                    elif not os.path.exists(load_lora_path):
+                        print_acc(f"Grabbing lora from the hub: {load_lora_path}")
+                        new_lora_path = hf_hub_download(
+                            load_lora_path,
+                            filename="pytorch_lora_weights.safetensors"
+                        )
+                        # replace the path
+                        load_lora_path = new_lora_path
+
+                        if self.model_config.inference_lora_path is not None:
+                            self.model_config.inference_lora_path = new_lora_path
+                        if self.model_config.assistant_lora_path is not None:
+                            self.model_config.assistant_lora_path = new_lora_path
+
+                    if self.model_config.assistant_lora_path is not None:
+                        # for flux, we assume it is flux schnell. We cannot merge in the assistant lora and unmerge it on
+                        # quantized weights so it had to process unmerged (slow). Since schnell samples in just 4 steps
+                        # it is better to merge it in now, and sample slowly later, otherwise training is slowed in half
+                        # so we will merge in now and sample with -1 weight later
+                        self.invert_assistant_lora = True
+                        # trigger it to get merged in
+                        self.model_config.lora_path = self.model_config.assistant_lora_path
+
+                if self.model_config.lora_path is not None:
+                    print_acc("Fusing in LoRA")
+                    # need the pipe for peft
+                    pipe: FluxPipeline = FluxPipeline(
+                        scheduler=None,
+                        text_encoder=None,
+                        tokenizer=None,
+                        text_encoder_2=None,
+                        tokenizer_2=None,
+                        vae=None,
+                        transformer=transformer,
+                    )
+                    if self.low_vram:
+                        # we cannot fuse the loras all at once without ooming in lowvram mode, so we have to do it in parts
+                        # we can do it on the cpu but it takes about 5-10 mins vs seconds on the gpu
+                        # we are going to separate it into the two transformer blocks one at a time
+
+                        lora_state_dict = load_file(self.model_config.lora_path)
+                        single_transformer_lora = {}
+                        single_block_key = "transformer.single_transformer_blocks."
+                        double_transformer_lora = {}
+                        double_block_key = "transformer.transformer_blocks."
+                        for key, value in lora_state_dict.items():
+                            if single_block_key in key:
+                                single_transformer_lora[key] = value
+                            elif double_block_key in key:
+                                double_transformer_lora[key] = value
+                            else:
+                                raise ValueError(f"Unknown lora key: {key}. Cannot load this lora in low vram mode")
+
+                        # double blocks
+                        transformer.transformer_blocks = transformer.transformer_blocks.to(
+                            self.quantize_device, dtype=dtype
+                        )
+                        pipe.load_lora_weights(double_transformer_lora, adapter_name=f"lora1_double")
+                        pipe.fuse_lora()
+                        pipe.unload_lora_weights()
+                        transformer.transformer_blocks = transformer.transformer_blocks.to(
+                            'cpu', dtype=dtype
+                        )
+
+                        # single blocks
+                        transformer.single_transformer_blocks = transformer.single_transformer_blocks.to(
+                            self.quantize_device, dtype=dtype
+                        )
+                        pipe.load_lora_weights(single_transformer_lora, adapter_name=f"lora1_single")
+                        pipe.fuse_lora()
+                        pipe.unload_lora_weights()
+                        transformer.single_transformer_blocks = transformer.single_transformer_blocks.to(
+                            'cpu', dtype=dtype
+                        )
+
+                        # cleanup
+                        del single_transformer_lora
+                        del double_transformer_lora
+                        del lora_state_dict
+                        flush()
+
+                    else:
+                        # need the pipe to do this unfortunately for now
+                        # we have to fuse in the weights before quantizing
+                        pipe.load_lora_weights(self.model_config.lora_path, adapter_name="lora1")
+                        pipe.fuse_lora()
+                        # unfortunately, not an easier way with peft
+                        pipe.unload_lora_weights()
+                flush()
+
+                if self.model_config.quantize:
+                    # patch the state dict method
+                    patch_dequantization_on_save(transformer)
+                    quantization_type = get_qtype(self.model_config.qtype)
+                    self.print_and_status_update("Quantizing transformer")
+                    quantize(transformer, weights=quantization_type, **self.model_config.quantize_kwargs)
+                    freeze(transformer)
+                    transformer.to(self.device_torch)
+                else:
+                    transformer.to(self.device_torch, dtype=dtype)
 
             flush()
 
@@ -795,17 +830,32 @@ class StableDiffusion:
             
             self.print_and_status_update("Loading T5")
             tokenizer_2 = T5TokenizerFast.from_pretrained(base_model_path, subfolder="tokenizer_2", torch_dtype=dtype)
-            text_encoder_2 = T5EncoderModel.from_pretrained(base_model_path, subfolder="text_encoder_2",
-                                                            torch_dtype=dtype)
 
-            text_encoder_2.to(self.device_torch, dtype=dtype)
-            flush()
-
-            if self.model_config.quantize_te:
-                self.print_and_status_update("Quantizing T5")
-                quantize(text_encoder_2, weights=get_qtype(self.model_config.qtype))
-                freeze(text_encoder_2)
+            if self.model_config.quantized_te_id is not None:
+                self.print_and_status_update(
+                    f"Loading pre-quantized T5 from {self.model_config.quantized_te_id}"
+                )
+                text_encoder_2 = _load_prequantized_model(
+                    self.model_config.quantized_te_id,
+                    T5EncoderModel,
+                )
+                # Move to device; dtype is intentionally omitted to preserve
+                # the pre-quantized weight dtypes (e.g. float8_e4m3fn).
+                text_encoder_2.to(self.device_torch)
+            else:
+                text_encoder_2 = T5EncoderModel.from_pretrained(
+                    base_model_path, subfolder="text_encoder_2", torch_dtype=dtype
+                )
+                text_encoder_2.to(self.device_torch, dtype=dtype)
                 flush()
+
+                if self.model_config.quantize_te:
+                    self.print_and_status_update("Quantizing T5")
+                    quantize(text_encoder_2, weights=get_qtype(self.model_config.qtype))
+                    freeze(text_encoder_2)
+                    flush()
+
+            flush()
                 
             self.print_and_status_update("Loading CLIP")
             text_encoder = CLIPTextModel.from_pretrained(base_model_path, subfolder="text_encoder", torch_dtype=dtype)
@@ -859,36 +909,47 @@ class StableDiffusion:
                 if os.path.exists(te_folder_path):
                     base_model_path = model_path
 
-            transformer = Lumina2Transformer2DModel.from_pretrained(
-                transformer_path,
-                subfolder=subfolder,
-                torch_dtype=dtype,
-            )
-            
-            if self.model_config.split_model_over_gpus:
-                raise ValueError("Splitting model over gpus is not supported for Lumina2 models")
-            
-            transformer.to(self.quantize_device, dtype=dtype)
-            flush()
-
-            if self.model_config.assistant_lora_path is not None or self.model_config.inference_lora_path is not None:
-                raise ValueError("Assistant LoRA is not supported for Lumina2 models currently")
-
-            if self.model_config.lora_path is not None:
-                raise ValueError("Loading LoRA is not supported for Lumina2 models currently")
-            
-            flush()
-            
-            if self.model_config.quantize:
-                # patch the state dict method
+            if self.model_config.quantized_model_id is not None:
+                self.print_and_status_update(
+                    f"Loading pre-quantized transformer from {self.model_config.quantized_model_id}"
+                )
+                transformer = _load_prequantized_model(
+                    self.model_config.quantized_model_id,
+                    Lumina2Transformer2DModel,
+                )
                 patch_dequantization_on_save(transformer)
-                quantization_type = get_qtype(self.model_config.qtype)
-                self.print_and_status_update("Quantizing transformer")
-                quantize(transformer, weights=quantization_type, **self.model_config.quantize_kwargs)
-                freeze(transformer)
                 transformer.to(self.device_torch)
             else:
-                transformer.to(self.device_torch, dtype=dtype)
+                transformer = Lumina2Transformer2DModel.from_pretrained(
+                    transformer_path,
+                    subfolder=subfolder,
+                    torch_dtype=dtype,
+                )
+
+                if self.model_config.split_model_over_gpus:
+                    raise ValueError("Splitting model over gpus is not supported for Lumina2 models")
+
+                transformer.to(self.quantize_device, dtype=dtype)
+                flush()
+
+                if self.model_config.assistant_lora_path is not None or self.model_config.inference_lora_path is not None:
+                    raise ValueError("Assistant LoRA is not supported for Lumina2 models currently")
+
+                if self.model_config.lora_path is not None:
+                    raise ValueError("Loading LoRA is not supported for Lumina2 models currently")
+
+                flush()
+
+                if self.model_config.quantize:
+                    # patch the state dict method
+                    patch_dequantization_on_save(transformer)
+                    quantization_type = get_qtype(self.model_config.qtype)
+                    self.print_and_status_update("Quantizing transformer")
+                    quantize(transformer, weights=quantization_type, **self.model_config.quantize_kwargs)
+                    freeze(transformer)
+                    transformer.to(self.device_torch)
+                else:
+                    transformer.to(self.device_torch, dtype=dtype)
 
             flush()
 
@@ -896,26 +957,45 @@ class StableDiffusion:
             self.print_and_status_update("Loading vae")
             vae = AutoencoderKL.from_pretrained(base_model_path, subfolder="vae", torch_dtype=dtype)
             flush()
-            
-            if self.model_config.te_name_or_path is not None:
+
+            if self.model_config.quantized_te_id is not None:
+                self.print_and_status_update(
+                    f"Loading pre-quantized Gemma2 from {self.model_config.quantized_te_id}"
+                )
+                tokenizer = AutoTokenizer.from_pretrained(
+                    self.model_config.quantized_te_id, torch_dtype=dtype
+                )
+                text_encoder = _load_prequantized_model(
+                    self.model_config.quantized_te_id,
+                    AutoModel,
+                )
+                text_encoder.to(self.device_torch)
+            elif self.model_config.te_name_or_path is not None:
                 self.print_and_status_update("Loading TE")
                 tokenizer = AutoTokenizer.from_pretrained(self.model_config.te_name_or_path, torch_dtype=dtype)
                 text_encoder = AutoModel.from_pretrained(self.model_config.te_name_or_path, torch_dtype=dtype)
+                text_encoder.to(self.device_torch, dtype=dtype)
+                flush()
+
+                if self.model_config.quantize_te:
+                    self.print_and_status_update("Quantizing Gemma2")
+                    quantize(text_encoder, weights=get_qtype(self.model_config.qtype))
+                    freeze(text_encoder)
+                    flush()
             else:
                 self.print_and_status_update("Loading Gemma2")
                 tokenizer = AutoTokenizer.from_pretrained(base_model_path, subfolder="tokenizer", torch_dtype=dtype)
                 text_encoder = AutoModel.from_pretrained(base_model_path, subfolder="text_encoder", torch_dtype=dtype)
-
-            text_encoder.to(self.device_torch, dtype=dtype)
-            flush()
-
-            if self.model_config.quantize_te:
-                self.print_and_status_update("Quantizing Gemma2")
-                quantize(text_encoder, weights=get_qtype(self.model_config.qtype))
-                freeze(text_encoder)
+                text_encoder.to(self.device_torch, dtype=dtype)
                 flush()
 
-            self.print_and_status_update("Making pipe")
+                if self.model_config.quantize_te:
+                    self.print_and_status_update("Quantizing Gemma2")
+                    quantize(text_encoder, weights=get_qtype(self.model_config.qtype))
+                    freeze(text_encoder)
+                    flush()
+
+            flush()
             pipe: Lumina2Pipeline = Lumina2Pipeline(
                 scheduler=scheduler,
                 text_encoder=None,

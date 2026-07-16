@@ -29,11 +29,13 @@ from toolkit.accelerator import unwrap_model
 from toolkit.advanced_prompt_embeds import AdvancedPromptEmbeds
 from toolkit.basic import flush
 from toolkit.config_modules import GenerateImageConfig, ModelConfig
+from toolkit.dequantize import patch_dequantization_on_save
 from toolkit.models.base_model import BaseModel
 from toolkit.samplers.custom_flowmatch_sampler import (
     CustomFlowMatchEulerDiscreteScheduler,
 )
 from toolkit.util.quantize import quantize, get_qtype, quantize_model
+from toolkit.util.prequantized import load_prequantized_model as _load_prequantized_model
 
 from optimum.quanto import freeze, QTensor
 from diffusers import AutoencoderKL
@@ -166,17 +168,39 @@ class BooguImageModel(BaseModel):
         # torchao float8 .bin weights that need a matching torchao/cache_dit to
         # deserialize -- use the bf16 repo and let ai-toolkit quantize if wanted.
         self.print_and_status_update("Loading transformer")
-        try:
-            transformer = BooguImageTransformer2DModel.from_pretrained(
-                base, subfolder="transformer", torch_dtype=dtype, token=HF_TOKEN
+        if self.model_config.quantized_model_id is not None:
+            self.print_and_status_update(
+                f"Loading pre-quantized transformer from {self.model_config.quantized_model_id}"
             )
-        except OSError as e:
-            raise OSError(
-                f"Could not load Boogu transformer safetensors from '{base}'. The "
-                f"'-fp8' release ships torchao float8 .bin weights, which are not "
-                f"supported here -- point model.name_or_path at the bf16 repo "
-                f"'{BOOGU_BASE_PATH}' instead."
-            ) from e
+            try:
+                transformer = _load_prequantized_model(
+                    self.model_config.quantized_model_id,
+                    BooguImageTransformer2DModel,
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    f"Could not load pre-quantized Boogu transformer from "
+                    f"'{self.model_config.quantized_model_id}': {e}"
+                ) from e
+            patch_dequantization_on_save(transformer)
+        else:
+            try:
+                transformer = BooguImageTransformer2DModel.from_pretrained(
+                    base, subfolder="transformer", torch_dtype=dtype, token=HF_TOKEN
+                )
+            except OSError as e:
+                raise OSError(
+                    f"Could not load Boogu transformer safetensors from '{base}'. The "
+                    f"'-fp8' release ships torchao float8 .bin weights, which are not "
+                    f"supported here -- point model.name_or_path at the bf16 repo "
+                    f"'{BOOGU_BASE_PATH}' instead."
+                ) from e
+
+            if self.model_config.quantize:
+                self.print_and_status_update("Quantizing transformer")
+                transformer = quantize_model(self, transformer)
+                flush()
+
         transformer.eval()
         flush()
 
@@ -187,11 +211,6 @@ class BooguImageModel(BaseModel):
         )
         if attention_backend != "native":
             transformer.set_attention_backend(attention_backend)
-
-        if self.model_config.quantize:
-            self.print_and_status_update("Quantizing transformer")
-            quantize_model(self, transformer)
-            flush()
 
         if self.model_config.low_vram:
             self.print_and_status_update("Moving transformer to CPU")
@@ -206,15 +225,36 @@ class BooguImageModel(BaseModel):
             "text_encoder_subfolder", "mllm"
         )
         self.print_and_status_update("Loading Qwen3-VL instruction encoder")
-        processor = AutoProcessor.from_pretrained(
-            te_path, subfolder="processor", token=HF_TOKEN
-        )
-        # AutoModel yields the inner Qwen3VLModel (the ``.model`` of the
-        # *ForConditionalGeneration), whose last_hidden_state is exactly the
-        # instruction feature the Boogu pipeline consumes.
-        text_encoder = AutoModel.from_pretrained(
-            te_path, subfolder=te_subfolder, torch_dtype=dtype, token=HF_TOKEN
-        )
+
+        if self.model_config.quantized_te_id is not None:
+            self.print_and_status_update(
+                f"Loading pre-quantized instruction encoder from {self.model_config.quantized_te_id}"
+            )
+            processor = AutoProcessor.from_pretrained(
+                te_path, subfolder="processor", token=HF_TOKEN
+            )
+            text_encoder = _load_prequantized_model(
+                self.model_config.quantized_te_id,
+                AutoModel,
+            )
+        else:
+            processor = AutoProcessor.from_pretrained(
+                te_path, subfolder="processor", token=HF_TOKEN
+            )
+            # AutoModel yields the inner Qwen3VLModel (the ``.model`` of the
+            # *ForConditionalGeneration), whose last_hidden_state is exactly the
+            # instruction feature the Boogu pipeline consumes.
+            text_encoder = AutoModel.from_pretrained(
+                te_path, subfolder=te_subfolder, torch_dtype=dtype, token=HF_TOKEN
+            )
+
+            if self.model_config.quantize_te:
+                self.print_and_status_update("Quantizing instruction encoder")
+                text_encoder.to(self.device_torch)
+                quantize(text_encoder, weights=get_qtype(self.model_config.qtype_te))
+                freeze(text_encoder)
+                flush()
+
         text_encoder.eval()
         text_encoder.requires_grad_(False)
         # The vision tower's bf16 Conv3d patch_embed has no fast kernel and stalls
@@ -226,13 +266,6 @@ class BooguImageModel(BaseModel):
                 f"  - patched {n_patched} Qwen-VL Conv3d patch_embed -> linear"
             )
         flush()
-
-        if self.model_config.quantize_te:
-            self.print_and_status_update("Quantizing instruction encoder")
-            text_encoder.to(self.device_torch)
-            quantize(text_encoder, weights=get_qtype(self.model_config.qtype_te))
-            freeze(text_encoder)
-            flush()
 
         if self.model_config.low_vram:
             self.print_and_status_update("Moving instruction encoder to CPU")

@@ -19,6 +19,7 @@ from toolkit.accelerator import get_accelerator, unwrap_model
 from optimum.quanto import freeze, QTensor
 from toolkit.util.mask import generate_random_mask, random_dialate_mask
 from toolkit.util.quantize import quantize, get_qtype
+from toolkit.util.prequantized import load_prequantized_model as _load_prequantized_model
 from transformers import T5TokenizerFast, T5EncoderModel, CLIPTextModel, CLIPTokenizer, TorchAoConfig as TorchAoConfigTransformers
 from .src.pipelines.hidream_image.pipeline_hidream_image import HiDreamImagePipeline
 from .src.models.transformers.transformer_hidream_image import HiDreamImageTransformer2DModel
@@ -124,38 +125,53 @@ class HidreamModel(BaseModel):
         flush()
         
         self.print_and_status_update("Loading transformer")
-            
-        transformer = self.hidream_transformer_class.from_pretrained(
-            model_path, 
-            subfolder="transformer", 
-            torch_dtype=torch.bfloat16
-        )
-        
-        if not self.low_vram:
-            transformer.to(self.device_torch, dtype=dtype)
-        
-        if self.model_config.quantize:
-            self.print_and_status_update("Quantizing transformer")
-            quantization_type = get_qtype(self.model_config.qtype)
-            if self.low_vram:
-                # move and quantize only certain pieces at a time.
-                all_blocks = list(transformer.double_stream_blocks) + list(transformer.single_stream_blocks)
-                self.print_and_status_update(" - quantizing transformer blocks")
-                for block in tqdm(all_blocks):
-                    block.to(self.device_torch, dtype=dtype)
-                    quantize(block, weights=quantization_type)
-                    freeze(block)
-                    block.to('cpu')
-                    # flush()
-                
-                self.print_and_status_update(" - quantizing extras")
+
+        if self.model_config.quantized_model_id is not None:
+            self.print_and_status_update(
+                f"Loading pre-quantized transformer from {self.model_config.quantized_model_id}"
+            )
+            transformer = _load_prequantized_model(
+                self.model_config.quantized_model_id,
+                self.hidream_transformer_class,
+            )
+            patch_dequantization_on_save(transformer)
+            # In low_vram mode the transformer is intentionally kept on CPU
+            # until after all other components are loaded (see below).
+            # dtype is omitted to preserve the pre-quantized weight dtypes.
+            if not self.low_vram:
+                transformer.to(self.device_torch)
+        else:
+            transformer = self.hidream_transformer_class.from_pretrained(
+                model_path,
+                subfolder="transformer",
+                torch_dtype=torch.bfloat16
+            )
+
+            if not self.low_vram:
                 transformer.to(self.device_torch, dtype=dtype)
-                quantize(transformer, weights=quantization_type)
-                freeze(transformer)
-            else: 
-                quantize(transformer, weights=quantization_type)
-                freeze(transformer)
-            
+
+            if self.model_config.quantize:
+                self.print_and_status_update("Quantizing transformer")
+                quantization_type = get_qtype(self.model_config.qtype)
+                if self.low_vram:
+                    # move and quantize only certain pieces at a time.
+                    all_blocks = list(transformer.double_stream_blocks) + list(transformer.single_stream_blocks)
+                    self.print_and_status_update(" - quantizing transformer blocks")
+                    for block in tqdm(all_blocks):
+                        block.to(self.device_torch, dtype=dtype)
+                        quantize(block, weights=quantization_type)
+                        freeze(block)
+                        block.to('cpu')
+                        # flush()
+
+                    self.print_and_status_update(" - quantizing extras")
+                    transformer.to(self.device_torch, dtype=dtype)
+                    quantize(transformer, weights=quantization_type)
+                    freeze(transformer)
+                else:
+                    quantize(transformer, weights=quantization_type)
+                    freeze(transformer)
+
         if self.low_vram:
             # unload it for now
             transformer.to('cpu')
@@ -197,19 +213,28 @@ class HidreamModel(BaseModel):
         
         flush()
         self.print_and_status_update("Loading T5 encoders")
-        
-        text_encoder_3 = T5EncoderModel.from_pretrained(
-            extras_path,
-            subfolder="text_encoder_3",
-            torch_dtype=torch.bfloat16
-        ).to(self.device_torch, dtype=dtype)
-        
-        if self.model_config.quantize_te:
-            self.print_and_status_update("Quantizing T5")
-            quantization_type = get_qtype(self.model_config.qtype_te)
-            quantize(text_encoder_3, weights=quantization_type)
-            freeze(text_encoder_3)
-            flush()
+
+        if self.model_config.quantized_te_id is not None:
+            self.print_and_status_update(
+                f"Loading pre-quantized T5 from {self.model_config.quantized_te_id}"
+            )
+            text_encoder_3 = _load_prequantized_model(
+                self.model_config.quantized_te_id,
+                T5EncoderModel,
+            ).to(self.device_torch)
+        else:
+            text_encoder_3 = T5EncoderModel.from_pretrained(
+                extras_path,
+                subfolder="text_encoder_3",
+                torch_dtype=torch.bfloat16
+            ).to(self.device_torch, dtype=dtype)
+
+            if self.model_config.quantize_te:
+                self.print_and_status_update("Quantizing T5")
+                quantization_type = get_qtype(self.model_config.qtype_te)
+                quantize(text_encoder_3, weights=quantization_type)
+                freeze(text_encoder_3)
+                flush()
         
         tokenizer_3 = T5Tokenizer.from_pretrained(
             extras_path,

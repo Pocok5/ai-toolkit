@@ -231,7 +231,7 @@ class ZImageModel(BaseModel):
         # into full precision weights first (or the checkpoint was pre-quantized)
         if self.model_config.quantize and not transformer.aitk_is_quantized:
             self.print_and_status_update("Quantizing Transformer")
-            quantize_model(self, transformer)
+            transformer = quantize_model(self, transformer)
             flush()
 
         if (

@@ -660,6 +660,11 @@ class ModelConfig:
         self.quantize_te = kwargs.get("quantize_te", self.quantize)
         self.qtype = kwargs.get("qtype", "qfloat8")
         self.qtype_te = kwargs.get("qtype_te", "qfloat8")
+        # Cache directory for post-quantization state dicts.
+        # Defaults to ~/.cache/ai-toolkit/quantized/.  Set to a custom path to
+        # override, or set use_quantize_cache: false to disable caching.
+        self.quantize_cache_dir: Optional[str] = kwargs.get("quantize_cache_dir", None)
+        self.use_quantize_cache: bool = bool(kwargs.get("use_quantize_cache", True))
         self.low_vram = kwargs.get("low_vram", False)
         self.attn_masking = kwargs.get("attn_masking", False)
         if self.attn_masking and not self.is_flux:
@@ -730,7 +735,59 @@ class ModelConfig:
         self.model_paths = kwargs.get("model_paths", {})
         
         self.in_context = kwargs.get("in_context", False)
-        
+
+        # HF repo ID or local path to a pre-quantized diffuser/transformer model.
+        # When set, the model is loaded directly from this location (preserving its
+        # saved dtype via torch_dtype="auto") instead of loading from name_or_path
+        # and running on-the-fly quantization.
+        # Accepts the formats:
+        #   "username/repo-name"                         - HF repo (no subfolder)
+        #   "username/repo-name/subfolder"               - HF repo with subfolder
+        #   "/local/path/to/transformer"                 - local model directory
+        #   "/local/path/to/transformer.safetensors"     - specific local file
+        #   "username/repo-name:model-fp8.safetensors"   - specific file from HF repo
+        #   "username/repo-name/subfolder:model-q4.safetensors" - file in a subfolder
+        self.quantized_model_id: Optional[str] = kwargs.get("quantized_model_id", None)
+
+        # Same as quantized_model_id but for the text encoder.
+        self.quantized_te_id: Optional[str] = kwargs.get("quantized_te_id", None)
+
+        # Emit warnings for settings that are incompatible with pre-quantized models.
+        if self.quantized_model_id is not None:
+            if self.quantize:
+                print(
+                    "WARNING: 'quantize: true' is set but 'quantized_model_id' is also "
+                    "provided.  On-the-fly quantization of the transformer will be skipped "
+                    "because the pre-quantized model will be loaded directly."
+                )
+            if self.low_vram:
+                print(
+                    "WARNING: 'low_vram' is not supported for pre-quantized models and "
+                    "will be ignored for the transformer.  The pre-quantized model is "
+                    "loaded in one pass without the block-by-block VRAM optimisation."
+                )
+            if self.accuracy_recovery_adapter is not None:
+                print(
+                    "WARNING: 'accuracy_recovery_adapter' is not compatible with "
+                    "pre-quantized models (quantized_model_id).  The accuracy recovery "
+                    "adapter will be ignored."
+                )
+
+        if self.quantized_te_id is not None and self.quantize_te:
+            print(
+                "WARNING: 'quantize_te: true' is set but 'quantized_te_id' is also "
+                "provided.  On-the-fly quantization of the text encoder will be skipped "
+                "because the pre-quantized text encoder will be loaded directly."
+            )
+
+        if self.quantized_model_id is not None and self.lora_path is not None:
+            print(
+                "WARNING: 'lora_path' is set alongside 'quantized_model_id'.  LoRA "
+                "fusion into base weights before quantization is not applicable when "
+                "loading a pre-quantized model.  The lora_path will be ignored during "
+                "model loading."
+            )
+
         # allow frontend to pass arch with a color like arch:tag
         # but remove the tag
         if self.arch is not None:

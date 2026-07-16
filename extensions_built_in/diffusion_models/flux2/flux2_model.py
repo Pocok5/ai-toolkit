@@ -161,7 +161,7 @@ class Flux2Model(BaseModel):
             # Avoid full-model peak VRAM allocation before quantization.
             self.print_and_status_update("Keeping transformer on CPU for quantization")
             self.print_and_status_update("Quantizing Transformer")
-            quantize_model(self, transformer)
+            transformer = quantize_model(self, transformer)
             flush()
         else:
             transformer.to(self.device_torch, dtype=dtype)

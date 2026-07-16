@@ -227,13 +227,67 @@ def quantize(
 def quantize_model(
     base_model: "BaseModel",
     model_to_quantize: torch.nn.Module,
-):
+    cache_tag: Optional[str] = None,
+) -> torch.nn.Module:
+    """Quantize *model_to_quantize* and return the quantized model.
+
+    The returned object is **not** guaranteed to be the same instance as
+    *model_to_quantize*.  When the cache path is taken (either a cache hit that
+    loads a previously-saved result, or a cache miss that quantizes then reloads
+    from the freshly written cache), a new model instance is returned and the
+    original *model_to_quantize* is freed to reclaim RAM.  Always use the
+    returned value; do not keep a reference to the input.
+
+    If quantization caching is enabled (``use_quantize_cache: true`` in the
+    model config, which is the default) and a valid cache exists for the
+    current ``(name_or_path, qtype)`` combination, the cached quantized weights
+    are loaded directly and the expensive block-by-block quantization pass is
+    skipped.  On the first run (cache miss) the model is quantized normally and
+    the result is saved to the cache so that future runs are fast.
+
+    Pass *cache_tag* to differentiate multiple transformers that share the same
+    ``name_or_path`` (e.g. ``"transformer_1"`` / ``"transformer_2"``).
+    """
     from toolkit.dequantize import patch_dequantization_on_save
 
     if not hasattr(base_model, "get_transformer_block_names"):
         raise ValueError(
             "The model to quantize must have a method `get_transformer_block_names`."
         )
+
+    # ------------------------------------------------------------------ #
+    # Cache check – skip quantization entirely if a valid cache exists.   #
+    # Only the simple (non-ARA) path is cached; the accuracy-recovery     #
+    # adapter path is too model-specific to cache reliably.               #
+    # ------------------------------------------------------------------ #
+    use_cache = getattr(base_model.model_config, "use_quantize_cache", True)
+    _name_or_path = getattr(base_model.model_config, "name_or_path", "")
+    _qtype = getattr(base_model.model_config, "qtype", "qfloat8")
+    _cache_root = getattr(base_model.model_config, "quantize_cache_dir", None)
+    if use_cache and base_model.model_config.accuracy_recovery_adapter is None:
+        from toolkit.util.quantize_cache import (
+            get_cache_dir,
+            has_valid_cache,
+            load_quantized_cache,
+        )
+
+        _cache_dir = get_cache_dir(_name_or_path, _qtype, _cache_root, cache_tag)
+
+        if has_valid_cache(_cache_dir):
+            base_model.print_and_status_update(
+                f"Loading quantized model from cache: {_cache_dir}"
+            )
+            try:
+                cached_model = load_quantized_cache(
+                    _cache_dir,
+                    type(model_to_quantize),
+                    _qtype,
+                )
+                return cached_model
+            except Exception as exc:
+                base_model.print_and_status_update(
+                    f"Cache load failed ({exc}); falling back to quantization"
+                )
 
     # patch the state dict method
     patch_dequantization_on_save(model_to_quantize)
@@ -424,3 +478,38 @@ def quantize_model(
         # model_to_quantize.to(base_model.device_torch, dtype=base_model.torch_dtype)
         quantize(model_to_quantize, weights=quantization_type, exclude=exclude_modules)
         freeze(model_to_quantize)
+
+    # ------------------------------------------------------------------ #
+    # Cache save – persist quantized weights so future runs skip this.    #
+    # ------------------------------------------------------------------ #
+    if use_cache and base_model.model_config.accuracy_recovery_adapter is None:
+        from toolkit.basic import flush
+        from toolkit.util.quantize_cache import (
+            get_cache_dir,
+            load_quantized_cache,
+            save_quantized_cache,
+        )
+
+        _cache_dir = get_cache_dir(_name_or_path, _qtype, _cache_root, cache_tag)
+        base_model.print_and_status_update(
+            f"Saving quantized model to cache: {_cache_dir}"
+        )
+        try:
+            save_quantized_cache(model_to_quantize, _cache_dir, _qtype)
+        except Exception as exc:
+            base_model.print_and_status_update(
+                f"Failed to save quantization cache ({exc}); continuing"
+            )
+        else:
+            # Save succeeded – free the original quantized model *before* loading
+            # the cache copy so the two full-model copies never coexist in RAM.
+            base_model.print_and_status_update(
+                "Reloading from cache to free memory for next model..."
+            )
+            model_class = type(model_to_quantize)
+            model_to_quantize.cpu()
+            del model_to_quantize
+            flush()
+            return load_quantized_cache(_cache_dir, model_class, _qtype)
+
+    return model_to_quantize
