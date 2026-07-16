@@ -138,8 +138,15 @@ def save_quantized_cache(
     if not cpu_sd:
         raise RuntimeError("quantize_cache: state dict is empty; nothing to save.")
 
+    # Release `sd` before writing – it holds the same tensor references as `cpu_sd`,
+    # so keeping it around while safetensors serialises would retain an extra
+    # Python reference count on every tensor.
+    del sd
+
     # Weights
     save_file(cpu_sd, os.path.join(cache_dir, _WEIGHTS_FILE))
+    # Release the dict so its tensor references are dropped promptly.
+    del cpu_sd
 
     # Model config (architecture only, no weights)
     try:

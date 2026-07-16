@@ -489,22 +489,20 @@ def quantize_model(
         )
         try:
             save_quantized_cache(model_to_quantize, _cache_dir, _qtype)
-            # Reload from the freshly written cache so the returned model is a
-            # clean, fully CPU-resident copy.
-            base_model.print_and_status_update(
-                "Reloading from cache to free GPU memory for next model..."
-            )
-            model_class = type(model_to_quantize)
-            reloaded = load_quantized_cache(_cache_dir, model_class, _qtype)
-            # Move the original to CPU now that we have the clean reload. This
-            # releases CUDA allocations immediately (before Python GC), making
-            # GPU memory available for the next model to quantize.
-            model_to_quantize.to("cpu")
-            flush()
-            return reloaded
         except Exception as exc:
             base_model.print_and_status_update(
                 f"Failed to save quantization cache ({exc}); continuing"
             )
+        else:
+            # Save succeeded – free the original quantized model *before* loading
+            # the cache copy so the two full-model copies never coexist in RAM.
+            base_model.print_and_status_update(
+                "Reloading from cache to free memory for next model..."
+            )
+            model_class = type(model_to_quantize)
+            model_to_quantize.cpu()
+            del model_to_quantize
+            flush()
+            return load_quantized_cache(_cache_dir, model_class, _qtype)
 
     return model_to_quantize

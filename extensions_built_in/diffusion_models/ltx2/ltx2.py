@@ -250,6 +250,9 @@ class LTX2Model(BaseModel):
         base_model_path = self.model_config.extras_name_or_path
 
         combined_state_dict = None
+        # Will be set in the combined-checkpoint path before quantization, so we can
+        # skip re-creating it later in the VAE-loading section.
+        connectors = None
 
         self.print_and_status_update("Loading transformer")
 
@@ -290,6 +293,23 @@ class LTX2Model(BaseModel):
                     original_dit_ckpt, version=self.ltx_version
                 )
                 transformer = transformer.to(dtype)
+                # Also create connectors from the same sub-dict right now so we can
+                # release the transformer (and connector) tensors from combined_state_dict
+                # before quantization begins.  The connector weights are small, but the
+                # transformer weights are huge, and they'd otherwise stay resident in RAM
+                # for the entire quantization pass.
+                connectors = convert_ltx2_connectors(
+                    original_dit_ckpt, version=self.ltx_version
+                ).to(dtype)
+                del original_dit_ckpt
+                # Remove all keys that live under dit_prefix (transformer + connector
+                # weights) and any top-level connector keys from combined_state_dict.
+                # The model objects now own those tensors; as each block is quantized
+                # the original bf16 tensors will be freed one by one.
+                _dit_connector_prefixes = (dit_prefix, "text_embedding_projection")
+                for key in [k for k in combined_state_dict if k.startswith(_dit_connector_prefixes)]:
+                    del combined_state_dict[key]
+                flush()
             else:
                 transformer_path = model_path
                 transformer_subfolder = "transformer"
@@ -498,13 +518,16 @@ class LTX2Model(BaseModel):
                 original_audio_vae_ckpt, version=self.ltx_version
             ).to(dtype)
             del original_audio_vae_ckpt
-            original_connectors_ckpt = get_model_state_dict_from_combined_ckpt(
-                combined_state_dict, dit_prefix
-            )
-            connectors = convert_ltx2_connectors(
-                original_connectors_ckpt, version=self.ltx_version
-            ).to(dtype)
-            del original_connectors_ckpt
+            # connectors were already created before quantization to allow
+            # the large dit tensors to be freed early; skip re-creating them.
+            if connectors is None:
+                original_connectors_ckpt = get_model_state_dict_from_combined_ckpt(
+                    combined_state_dict, dit_prefix
+                )
+                connectors = convert_ltx2_connectors(
+                    original_connectors_ckpt, version=self.ltx_version
+                ).to(dtype)
+                del original_connectors_ckpt
             original_vocoder_ckpt = get_model_state_dict_from_combined_ckpt(
                 combined_state_dict, vocoder_prefix
             )
