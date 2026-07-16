@@ -730,7 +730,56 @@ class ModelConfig:
         self.model_paths = kwargs.get("model_paths", {})
         
         self.in_context = kwargs.get("in_context", False)
-        
+
+        # HF repo ID or local path to a pre-quantized diffuser/transformer model.
+        # When set, the model is loaded directly from this location (preserving its
+        # saved dtype via torch_dtype="auto") instead of loading from name_or_path
+        # and running on-the-fly quantization.
+        # Accepts the formats:
+        #   "username/repo-name"               - HF repo with no subfolder
+        #   "username/repo-name/subfolder"     - HF repo with explicit subfolder
+        #   "/local/path/to/transformer"       - local model directory
+        self.quantized_model_id: Optional[str] = kwargs.get("quantized_model_id", None)
+
+        # Same as quantized_model_id but for the text encoder.
+        self.quantized_te_id: Optional[str] = kwargs.get("quantized_te_id", None)
+
+        # Emit warnings for settings that are incompatible with pre-quantized models.
+        if self.quantized_model_id is not None:
+            if self.quantize:
+                print(
+                    "WARNING: 'quantize: true' is set but 'quantized_model_id' is also "
+                    "provided.  On-the-fly quantization of the transformer will be skipped "
+                    "because the pre-quantized model will be loaded directly."
+                )
+            if self.low_vram:
+                print(
+                    "WARNING: 'low_vram' is not supported for pre-quantized models and "
+                    "will be ignored for the transformer.  The pre-quantized model is "
+                    "loaded in one pass without the block-by-block VRAM optimisation."
+                )
+            if self.accuracy_recovery_adapter is not None:
+                print(
+                    "WARNING: 'accuracy_recovery_adapter' is not compatible with "
+                    "pre-quantized models (quantized_model_id).  The accuracy recovery "
+                    "adapter will be ignored."
+                )
+
+        if self.quantized_te_id is not None and self.quantize_te:
+            print(
+                "WARNING: 'quantize_te: true' is set but 'quantized_te_id' is also "
+                "provided.  On-the-fly quantization of the text encoder will be skipped "
+                "because the pre-quantized text encoder will be loaded directly."
+            )
+
+        if self.quantized_model_id is not None and self.lora_path is not None:
+            print(
+                "WARNING: 'lora_path' is set alongside 'quantized_model_id'.  LoRA "
+                "fusion into base weights before quantization is not applicable when "
+                "loading a pre-quantized model.  The lora_path will be ignored during "
+                "model loading."
+            )
+
         # allow frontend to pass arch with a color like arch:tag
         # but remove the tag
         if self.arch is not None:
