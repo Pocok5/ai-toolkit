@@ -14,6 +14,14 @@ Supported *model_id* formats
 ``"username/repo-name/subfolder"``
     Hugging Face repo with an explicit subfolder (e.g. ``"transformer"``).
 
+``"username/repo-name/weights.safetensors"``
+    Hugging Face repo with a specific weights file in the repo root.  The
+    config is loaded from the repo root and the named file is used as the
+    weights via the ``weights_name`` argument.
+
+``"username/repo-name/subfolder/weights.safetensors"``
+    Hugging Face repo with a specific weights file inside a subfolder.
+
 ``"/local/path/to/model"``
     Absolute or relative local path pointing to a directory that contains the
     model ``config.json`` and weight files.
@@ -36,11 +44,13 @@ same HF repo/subfolder).
 """
 
 import os
-from typing import Optional, Type, TypeVar
+from typing import Optional, Tuple, Type, TypeVar
 
 import torch
 
 T = TypeVar("T", bound=torch.nn.Module)
+
+SUPPORTED_WEIGHT_EXTENSIONS: Tuple[str, ...] = (".safetensors", ".bin", ".gguf")
 
 
 def load_prequantized_model(model_id: str, model_class: Type[T], **kwargs) -> T:
@@ -86,7 +96,7 @@ def load_prequantized_model(model_id: str, model_class: Type[T], **kwargs) -> T:
         # Split on the *last* colon so that Windows drive letters (C:/) also
         # work after normalisation (C:/ → already normalised above, but be safe).
         loc, _, wname = model_id.rpartition(":")
-        if wname.endswith((".safetensors", ".bin", ".gguf")):
+        if wname.endswith(SUPPORTED_WEIGHT_EXTENSIONS):
             model_id = loc
             weights_name = wname
             kwargs.setdefault("weights_name", weights_name)
@@ -100,7 +110,7 @@ def load_prequantized_model(model_id: str, model_class: Type[T], **kwargs) -> T:
             # as the pretrained_model_name_or_path and pass the filename as
             # weights_name so from_pretrained picks the right weights but still
             # loads the config.json from the same folder.
-            if not model_id.endswith((".safetensors", ".bin", ".gguf")):
+            if not model_id.endswith(SUPPORTED_WEIGHT_EXTENSIONS):
                 raise ValueError(
                     f"quantized_model_id / quantized_te_id points to a file "
                     f"that is not a .safetensors, .bin, or .gguf file: {model_id!r}."
@@ -124,10 +134,22 @@ def load_prequantized_model(model_id: str, model_class: Type[T], **kwargs) -> T:
     # ------------------------------------------------------------------ #
     parts = model_id.split("/")
     if len(parts) >= 3:
-        # "user/repo/subfolder[/deeper]"
+        # "user/repo/subfolder[/deeper]" or "user/repo/weights.safetensors"
         repo_id = "/".join(parts[:2])
-        subfolder = "/".join(parts[2:])
-        return model_class.from_pretrained(repo_id, subfolder=subfolder, **kwargs)
+        remainder = "/".join(parts[2:])
+        last_segment = parts[-1]
+        if last_segment.endswith(SUPPORTED_WEIGHT_EXTENSIONS) and weights_name is None:
+            # The final segment is a weights filename, not a subfolder.
+            # e.g. "user/repo/model-fp8.safetensors"
+            #   or "user/repo/subfolder/model-fp8.safetensors"
+            kwargs.setdefault("weights_name", last_segment)
+            subfolder = "/".join(parts[2:-1]) if len(parts) > 3 else None
+            if subfolder:
+                return model_class.from_pretrained(repo_id, subfolder=subfolder, **kwargs)
+            return model_class.from_pretrained(repo_id, **kwargs)
+        else:
+            subfolder = remainder
+            return model_class.from_pretrained(repo_id, subfolder=subfolder, **kwargs)
     else:
         # "user/repo" – no subfolder
         return model_class.from_pretrained(model_id, **kwargs)
