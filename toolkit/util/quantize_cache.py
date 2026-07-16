@@ -105,10 +105,30 @@ def save_quantized_cache(
         sd = type(model).state_dict(model)
 
     # Move to CPU and detach – safetensors requires contiguous CPU tensors.
+    # Tensor subclasses such as QTensor (optimum-quanto) and AffineQuantizedTensor
+    # (torchao) do not expose a usable raw storage pointer, so safetensors cannot
+    # serialize them directly.  We expand optimum-quanto QTensors into their
+    # raw ._data / ._scale components (preserving the quantized representation)
+    # and dequantize any other tensor subclass as a fallback.
     cpu_sd: dict = {}
     for key, tensor in sd.items():
         try:
-            cpu_sd[key] = tensor.detach().contiguous().cpu()
+            t = tensor.detach()
+            if type(t) is not torch.Tensor:
+                if hasattr(t, '_data') and hasattr(t, '_scale'):
+                    # optimum-quanto QTensor: store the raw quantized components
+                    cpu_sd[key + "._data"] = t._data.detach().cpu().contiguous()
+                    cpu_sd[key + "._scale"] = t._scale.detach().cpu().contiguous()
+                elif hasattr(t, 'dequantize'):
+                    # torchao or other subclass: dequantize to a plain float tensor
+                    cpu_sd[key] = t.dequantize().detach().cpu().contiguous()
+                else:
+                    print_acc(
+                        f"[quantize_cache] Skipping unsupported tensor subclass "
+                        f"{type(t).__name__!r} for key {key!r}"
+                    )
+            else:
+                cpu_sd[key] = t.cpu().contiguous()
         except Exception as exc:
             print_acc(f"[quantize_cache] Skipping key {key!r} ({exc})")
 

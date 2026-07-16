@@ -476,7 +476,12 @@ def quantize_model(
     # Cache save – persist quantized weights so future runs skip this.    #
     # ------------------------------------------------------------------ #
     if use_cache and base_model.model_config.accuracy_recovery_adapter is None:
-        from toolkit.util.quantize_cache import get_cache_dir, save_quantized_cache
+        from toolkit.basic import flush
+        from toolkit.util.quantize_cache import (
+            get_cache_dir,
+            load_quantized_cache,
+            save_quantized_cache,
+        )
 
         _cache_dir = get_cache_dir(_name_or_path, _qtype, _cache_root, cache_tag)
         base_model.print_and_status_update(
@@ -484,6 +489,20 @@ def quantize_model(
         )
         try:
             save_quantized_cache(model_to_quantize, _cache_dir, _qtype)
+            # Reload from the freshly written cache so the returned model is a
+            # clean, fully CPU-resident copy.  Moving the original to CPU first
+            # releases any GPU memory held by the quantization pass, making room
+            # for the next model to be loaded and quantized.
+            base_model.print_and_status_update(
+                "Reloading from cache to free GPU memory for next model..."
+            )
+            model_class = type(model_to_quantize)
+            reloaded = load_quantized_cache(_cache_dir, model_class, _qtype)
+            # Reload succeeded – now release the GPU-resident original.
+            model_to_quantize.to("cpu")
+            del model_to_quantize
+            flush()
+            model_to_quantize = reloaded
         except Exception as exc:
             base_model.print_and_status_update(
                 f"Failed to save quantization cache ({exc}); continuing"
