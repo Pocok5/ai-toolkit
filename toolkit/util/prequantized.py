@@ -24,7 +24,7 @@ Supported *model_id* formats
     is loaded via the ``weights_name`` argument to ``from_pretrained``.
 
 Appending ``:filename.safetensors`` to any of the above forms lets you pick a
-specific weight file when a directory or repo contains several quantisation
+specific weight file when a directory or repo contains several quantization
 variants::
 
     "/local/path/to/model:model-fp8.safetensors"
@@ -86,7 +86,7 @@ def load_prequantized_model(model_id: str, model_class: Type[T], **kwargs) -> T:
         # Split on the *last* colon so that Windows drive letters (C:/) also
         # work after normalisation (C:/ → already normalised above, but be safe).
         loc, _, wname = model_id.rpartition(":")
-        if wname.endswith(".safetensors") or wname.endswith(".bin") or wname.endswith(".gguf"):
+        if wname.endswith((".safetensors", ".bin", ".gguf")):
             model_id = loc
             weights_name = wname
             kwargs.setdefault("weights_name", weights_name)
@@ -100,10 +100,10 @@ def load_prequantized_model(model_id: str, model_class: Type[T], **kwargs) -> T:
             # as the pretrained_model_name_or_path and pass the filename as
             # weights_name so from_pretrained picks the right weights but still
             # loads the config.json from the same folder.
-            if not model_id.endswith((".safetensors", ".bin")):
+            if not model_id.endswith((".safetensors", ".bin", ".gguf")):
                 raise ValueError(
                     f"quantized_model_id / quantized_te_id points to a file "
-                    f"that is not a .safetensors or .bin file: {model_id!r}."
+                    f"that is not a .safetensors, .bin, or .gguf file: {model_id!r}."
                 )
             parent = os.path.dirname(os.path.abspath(model_id))
             fname = os.path.basename(model_id)
