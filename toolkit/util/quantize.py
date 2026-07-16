@@ -254,6 +254,9 @@ def quantize_model(
     # adapter path is too model-specific to cache reliably.               #
     # ------------------------------------------------------------------ #
     use_cache = getattr(base_model.model_config, "use_quantize_cache", True)
+    _name_or_path = getattr(base_model.model_config, "name_or_path", "")
+    _qtype = getattr(base_model.model_config, "qtype", "qfloat8")
+    _cache_root = getattr(base_model.model_config, "quantize_cache_dir", None)
     if use_cache and base_model.model_config.accuracy_recovery_adapter is None:
         from toolkit.util.quantize_cache import (
             get_cache_dir,
@@ -261,9 +264,6 @@ def quantize_model(
             load_quantized_cache,
         )
 
-        _name_or_path = getattr(base_model.model_config, "name_or_path", "")
-        _qtype = getattr(base_model.model_config, "qtype", "qfloat8")
-        _cache_root = getattr(base_model.model_config, "quantize_cache_dir", None)
         _cache_dir = get_cache_dir(_name_or_path, _qtype, _cache_root, cache_tag)
 
         if has_valid_cache(_cache_dir):
@@ -478,9 +478,6 @@ def quantize_model(
     if use_cache and base_model.model_config.accuracy_recovery_adapter is None:
         from toolkit.util.quantize_cache import get_cache_dir, save_quantized_cache
 
-        _name_or_path = getattr(base_model.model_config, "name_or_path", "")
-        _qtype = getattr(base_model.model_config, "qtype", "qfloat8")
-        _cache_root = getattr(base_model.model_config, "quantize_cache_dir", None)
         _cache_dir = get_cache_dir(_name_or_path, _qtype, _cache_root, cache_tag)
         base_model.print_and_status_update(
             f"Saving quantized model to cache: {_cache_dir}"

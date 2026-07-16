@@ -27,7 +27,7 @@ root.
 import hashlib
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Type, TypeVar
 
 import torch
@@ -137,7 +137,7 @@ def save_quantized_cache(
         "cache_version": _CURRENT_CACHE_VERSION,
         "qtype": qtype,
         "model_class": type(model).__name__,
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
     }
     with open(os.path.join(cache_dir, _CACHE_INFO_FILE), "w") as f:
         json.dump(info, f, indent=2)
@@ -177,6 +177,9 @@ def load_quantized_cache(
 
     # 3. Restore quantized weights from cache.
     cached_sd = load_file(os.path.join(cache_dir, _WEIGHTS_FILE))
+    # assign=True (requires PyTorch >= 2.1) assigns tensors directly rather
+    # than copying, which is necessary when the model may contain meta tensors
+    # and avoids shape-mismatch issues with quantized tensor subclasses.
     result = model.load_state_dict(cached_sd, strict=False, assign=True)
     if result.missing_keys:
         head = result.missing_keys[:5]
