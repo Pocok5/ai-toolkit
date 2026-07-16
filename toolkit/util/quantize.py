@@ -229,7 +229,14 @@ def quantize_model(
     model_to_quantize: torch.nn.Module,
     cache_tag: Optional[str] = None,
 ) -> torch.nn.Module:
-    """Quantize *model_to_quantize* in place and return it.
+    """Quantize *model_to_quantize* and return the quantized model.
+
+    The returned object is **not** guaranteed to be the same instance as
+    *model_to_quantize*.  When the cache path is taken (either a cache hit that
+    loads a previously-saved result, or a cache miss that quantizes then reloads
+    from the freshly written cache), a new model instance is returned and the
+    original *model_to_quantize* is freed to reclaim RAM.  Always use the
+    returned value; do not keep a reference to the input.
 
     If quantization caching is enabled (``use_quantize_cache: true`` in the
     model config, which is the default) and a valid cache exists for the

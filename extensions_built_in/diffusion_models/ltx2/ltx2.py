@@ -306,8 +306,11 @@ class LTX2Model(BaseModel):
                 # weights) and any top-level connector keys from combined_state_dict.
                 # The model objects now own those tensors; as each block is quantized
                 # the original bf16 tensors will be freed one by one.
+                # Build the list of keys to remove before iterating so that we
+                # don't mutate the dict while iterating over it.
                 _dit_connector_prefixes = (dit_prefix, "text_embedding_projection")
-                for key in [k for k in combined_state_dict if k.startswith(_dit_connector_prefixes)]:
+                _keys_to_remove = [k for k in combined_state_dict if k.startswith(_dit_connector_prefixes)]
+                for key in _keys_to_remove:
                     del combined_state_dict[key]
                 flush()
             else:
